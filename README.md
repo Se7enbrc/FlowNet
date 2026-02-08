@@ -11,7 +11,7 @@ Shoutout to [awdlkiller](https://github.com/jamestut/awdlkiller) for the origina
 ## Install
 
 ```bash
-brew install Se7enbrc/flownet/flownet
+brew install --cask Se7enbrc/flownet/flownet
 ```
 
 That's it. It'll prompt for your password and start automatically.

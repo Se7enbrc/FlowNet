@@ -4,8 +4,8 @@ import Darwin
 
 let TARGETIFNAM = "awdl0"
 
-// Routing message types (from net/route.h)
-let RTM_IFINFO: UInt8 = 0x0e  // Interface state change
+// Routing message types
+let RTM_IFINFO: UInt8 = 0x0e
 
 // Routing message header structure
 struct rt_msghdr {
@@ -69,14 +69,13 @@ class FlowNetDaemon {
             exit(1)
         }
 
-        // Create routing socket for monitoring interface changes
         routeSocket = socket(AF_ROUTE, SOCK_RAW, 0)
         if routeSocket < 0 {
             log("ERROR: Failed to create routing socket: \(String(cString: strerror(errno)))")
             exit(1)
         }
 
-        // Set socket to non-blocking mode for efficient message draining
+        // Non-blocking for efficient message draining
         let flags = fcntl(routeSocket, F_GETFL, 0)
         if flags < 0 {
             log("ERROR: Failed to get socket flags: \(String(cString: strerror(errno)))")
@@ -87,7 +86,7 @@ class FlowNetDaemon {
             exit(1)
         }
 
-        // Initial suppression - use aggressive mode with retries
+        // Initial suppression
         suppressWithRetry(reason: "Initial startup")
 
         log("Monitoring \(TARGETIFNAM) via routing socket + polling")
@@ -113,9 +112,9 @@ class FlowNetDaemon {
         var pollfd = Darwin.pollfd(fd: routeSocket, events: Int16(POLLIN), revents: 0)
         var buffer = [UInt8](repeating: 0, count: 2048)
         var periodicCheckCounter = 0
-        let periodicCheckInterval = 3  // Check every 3 seconds (more aggressive)
+        let periodicCheckInterval = 3
         var watchdogCounter = 0
-        let watchdogInterval = 30  // Log status every 30 seconds
+        let watchdogInterval = 30
 
         while running {
             // Detect potential wake from sleep (time gap > 5 seconds)
@@ -168,7 +167,7 @@ class FlowNetDaemon {
             }
 
             if pollfd.revents & Int16(POLLIN) != 0 {
-                // Data available - drain ALL pending messages
+                // Drain all pending routing messages
                 var awdlStateChanged = false
 
                 while true {
@@ -191,7 +190,7 @@ class FlowNetDaemon {
                     }
                 }
 
-                // Only suppress ONCE after draining all messages
+                // Suppress once after draining
                 if awdlStateChanged {
                     let status = checkAWDLStatus()
                     if status.isUp {
@@ -231,6 +230,7 @@ class FlowNetDaemon {
         return String(cString: ifname)
     }
 
+    // Interface state from ifconfig
     struct AWDLStatus {
         let isUp: Bool
         let flags: String
@@ -270,7 +270,6 @@ class FlowNetDaemon {
                         }
                     }
 
-                    // Check for both UP flag and active status
                     let hasUpFlag = output.range(of: "flags=[^<]*<[^>]*UP[^>]*>", options: .regularExpression) != nil
                     let isActive = output.contains("status: active")
 
@@ -300,8 +299,7 @@ class FlowNetDaemon {
             if suppressAWDL() {
                 suppressionCount += 1
 
-                // Verify suppression worked
-                usleep(100000)  // Wait 100ms
+                usleep(100000)
                 let statusAfter = checkAWDLStatus()
 
                 if !statusAfter.isUp {
@@ -414,7 +412,7 @@ class FlowNetDaemon {
     }
 
     private func processExists(_ pid: Int32) -> Bool {
-        return kill(pid, 0) == 0
+        return kill(pid, 0) == 0  // Non-destructive process existence check
     }
 
     private func log(_ message: String) {

@@ -5,7 +5,15 @@
 
 set -e
 
-DAEMON_BIN="/usr/local/bin/flownet"
+# Auto-detect Homebrew prefix (Apple Silicon vs Intel)
+if [ -x "/opt/homebrew/bin/flownet" ]; then
+    DAEMON_BIN="/opt/homebrew/bin/flownet"
+elif [ -x "/usr/local/bin/flownet" ]; then
+    DAEMON_BIN="/usr/local/bin/flownet"
+else
+    DAEMON_BIN="/usr/local/bin/flownet"  # Default for manual installs
+fi
+
 PLIST_PATH="/Library/LaunchDaemons/com.whaleyshire.flownet.plist"
 LOG_PATH="/var/log/flownet.log"
 LABEL="com.whaleyshire.flownet"
@@ -144,7 +152,7 @@ cmd_uninstall() {
     echo "✓ FlowNet uninstalled"
     echo ""
     echo "To reinstall:"
-    echo "  brew install flownet"
+    echo "  brew install --cask Se7enbrc/flownet/flownet"
     echo ""
     echo "Or build from source:"
     echo "  git clone https://github.com/Se7enbrc/flownet.git"
