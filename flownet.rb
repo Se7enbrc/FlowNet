@@ -21,13 +21,11 @@ class Flownet < Formula
   end
 
   def post_install
-    # Install plist to system location (requires sudo)
     plist_path = "/Library/LaunchDaemons/com.whaleyshire.flownet.plist"
     daemon_path = "#{opt_bin}/flownet"
     log_path = "/var/log/flownet.log"
 
-    # Create temporary plist with correct paths
-    plist_content = <<~EOS
+    plist_content = <<~PLIST
       <?xml version="1.0" encoding="UTF-8"?>
       <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
       <plist version="1.0">
@@ -61,26 +59,19 @@ class Flownet < Formula
           <true/>
       </dict>
       </plist>
-    EOS
+    PLIST
 
-    # Install plist using echo and sudo tee
-    IO.popen(["sudo", "tee", plist_path], "w") do |f|
-      f.write(plist_content)
-    end
+    # Write and install in one command that handles sudo prompting
+    system "echo '#{plist_content}' | sudo tee #{plist_path} > /dev/null && " \
+           "sudo chmod 644 #{plist_path} && " \
+           "sudo chown root:wheel #{plist_path} && " \
+           "sudo touch #{log_path} && " \
+           "sudo chmod 644 #{log_path} && " \
+           "sudo launchctl bootout system/com.whaleyshire.flownet 2>/dev/null || true && " \
+           "sudo launchctl bootstrap system #{plist_path} && " \
+           "sudo launchctl kickstart system/com.whaleyshire.flownet"
 
-    system "sudo", "chmod", "644", plist_path
-    system "sudo", "chown", "root:wheel", plist_path
-    system "sudo", "touch", log_path
-    system "sudo", "chmod", "644", log_path
-
-    # Stop existing service if running (ignore errors)
-    system "sudo", "launchctl", "bootout", "system/com.whaleyshire.flownet", err: [:child, :out]
-
-    # Start the service
-    system "sudo", "launchctl", "bootstrap", "system", plist_path
-    system "sudo", "launchctl", "kickstart", "system/com.whaleyshire.flownet"
-
-    ohai "FlowNet is now running!"
+    ohai "FlowNet is now running!" if $?.success?
   end
 
   def caveats
