@@ -45,7 +45,8 @@ class FlowNetDaemon {
     private var shutdownRequested = false
     private var routeSocket: Int32 = -1
     private var suppressionCount: UInt64 = 0
-    private var aggressiveMode = true  // Multi-layered suppression
+    private var aggressiveMode = true
+    private var lastLoopTime = Date()
 
     func start() {
         let myPID = ProcessInfo.processInfo.processIdentifier
@@ -86,14 +87,11 @@ class FlowNetDaemon {
             exit(1)
         }
 
-        // Initial suppression - use aggressive mode
-        if suppressAWDL() {
-            log("✓ Initial AWDL suppression successful")
-        } else {
-            log("⚠️  Initial AWDL suppression failed - will retry on state change")
-        }
+        // Initial suppression - use aggressive mode with retries
+        suppressWithRetry(reason: "Initial startup")
 
-        log("Monitoring \(TARGETIFNAM) via routing socket (event-driven)...")
+        log("Monitoring \(TARGETIFNAM) via routing socket + polling")
+        log("Wake-from-sleep detection enabled via time gap monitoring")
 
         // Event-driven monitoring loop
         eventLoop()
@@ -115,10 +113,21 @@ class FlowNetDaemon {
         var pollfd = Darwin.pollfd(fd: routeSocket, events: Int16(POLLIN), revents: 0)
         var buffer = [UInt8](repeating: 0, count: 2048)
         var periodicCheckCounter = 0
-        let periodicCheckInterval = 5  // Check every 5 seconds as fallback
+        let periodicCheckInterval = 3  // Check every 3 seconds (more aggressive)
+        var watchdogCounter = 0
+        let watchdogInterval = 30  // Log status every 30 seconds
 
         while running {
-            // Poll with 1 second timeout to allow signal handling and periodic checks
+            // Detect potential wake from sleep (time gap > 5 seconds)
+            let now = Date()
+            let timeSinceLastLoop = now.timeIntervalSince(lastLoopTime)
+            if timeSinceLastLoop > 5.0 {
+                log("⏰ Detected \(String(format: "%.1f", timeSinceLastLoop))s time gap - possible wake from sleep")
+                suppressWithRetry(reason: "Post-wake")
+            }
+            lastLoopTime = now
+
+            // Poll with 1 second timeout
             let result = Darwin.poll(&pollfd, 1, 1000)
 
             if result < 0 {
@@ -130,15 +139,27 @@ class FlowNetDaemon {
             }
 
             periodicCheckCounter += 1
+            watchdogCounter += 1
 
             // Periodic check as fallback (in case routing socket misses events)
             if periodicCheckCounter >= periodicCheckInterval {
                 periodicCheckCounter = 0
-                if isAWDLUp() {
-                    if suppressAWDL() {
-                        suppressionCount += 1
-                        log("✓ Periodic check: AWDL suppressed (count: \(suppressionCount))")
-                    }
+                let awdlStatus = checkAWDLStatus()
+                if awdlStatus.isUp {
+                    log("⚠️  Periodic check: AWDL is UP (flags: \(awdlStatus.flags), status: \(awdlStatus.status))")
+                    suppressWithRetry(reason: "Periodic check")
+                }
+            }
+
+            // Watchdog logging (every 30 seconds)
+            if watchdogCounter >= watchdogInterval {
+                watchdogCounter = 0
+                let status = checkAWDLStatus()
+                if status.isUp {
+                    log("⚠️  Watchdog: AWDL is STILL UP - attempting suppression")
+                    suppressWithRetry(reason: "Watchdog")
+                } else {
+                    log("✓ Watchdog: AWDL is DOWN (suppressions: \(suppressionCount))")
                 }
             }
 
@@ -172,12 +193,10 @@ class FlowNetDaemon {
 
                 // Only suppress ONCE after draining all messages
                 if awdlStateChanged {
-                    if isAWDLUp() {
+                    let status = checkAWDLStatus()
+                    if status.isUp {
                         log("⚡ AWDL detected UP via routing socket")
-                        if suppressAWDL() {
-                            suppressionCount += 1
-                            log("✓ AWDL suppressed (count: \(suppressionCount))")
-                        }
+                        suppressWithRetry(reason: "Routing socket event")
                     }
                 }
             }
@@ -212,7 +231,13 @@ class FlowNetDaemon {
         return String(cString: ifname)
     }
 
-    private func isAWDLUp() -> Bool {
+    struct AWDLStatus {
+        let isUp: Bool
+        let flags: String
+        let status: String
+    }
+
+    private func checkAWDLStatus() -> AWDLStatus {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
         task.arguments = [TARGETIFNAM]
@@ -228,13 +253,74 @@ class FlowNetDaemon {
             if task.terminationStatus == 0 {
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 if let output = String(data: data, encoding: .utf8) {
-                    return output.contains("flags=") && output.contains("UP")
+                    // Extract flags
+                    var flags = "unknown"
+                    var status = "unknown"
+
+                    for line in output.components(separatedBy: "\n") {
+                        if line.contains("flags=") {
+                            if let range = line.range(of: "flags=[^\\s]+", options: .regularExpression) {
+                                flags = String(line[range]).replacingOccurrences(of: "flags=", with: "")
+                            }
+                        }
+                        if line.contains("status:") {
+                            if let range = line.range(of: "status:\\s+\\w+", options: .regularExpression) {
+                                status = String(line[range]).replacingOccurrences(of: "status:\\s+", with: "", options: .regularExpression)
+                            }
+                        }
+                    }
+
+                    // Check for both UP flag and active status
+                    let hasUpFlag = output.range(of: "flags=[^<]*<[^>]*UP[^>]*>", options: .regularExpression) != nil
+                    let isActive = output.contains("status: active")
+
+                    return AWDLStatus(isUp: hasUpFlag || isActive, flags: flags, status: status)
                 }
             }
-            return false
+            return AWDLStatus(isUp: false, flags: "error", status: "error")
         } catch {
-            return false
+            log("⚠️  checkAWDLStatus() error: \(error.localizedDescription)")
+            return AWDLStatus(isUp: false, flags: "error", status: "error")
         }
+    }
+
+    private func suppressWithRetry(reason: String) {
+        var attempts = 0
+        let maxAttempts = 5
+
+        while attempts < maxAttempts {
+            let statusBefore = checkAWDLStatus()
+            if !statusBefore.isUp {
+                if attempts == 0 {
+                    log("✓ \(reason): AWDL already DOWN")
+                }
+                return
+            }
+
+            if suppressAWDL() {
+                suppressionCount += 1
+
+                // Verify suppression worked
+                usleep(100000)  // Wait 100ms
+                let statusAfter = checkAWDLStatus()
+
+                if !statusAfter.isUp {
+                    log("✅ \(reason): AWDL suppressed successfully (count: \(suppressionCount))")
+                    return
+                } else {
+                    log("⚠️  \(reason): Suppression command succeeded but AWDL still UP (attempt \(attempts + 1)/\(maxAttempts))")
+                }
+            } else {
+                log("⚠️  \(reason): Suppression command failed (attempt \(attempts + 1)/\(maxAttempts))")
+            }
+
+            attempts += 1
+            if attempts < maxAttempts {
+                usleep(500000)  // Wait 500ms before retry
+            }
+        }
+
+        log("❌ \(reason): Failed to suppress AWDL after \(maxAttempts) attempts")
     }
 
     // Multi-layered suppression approach
