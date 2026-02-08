@@ -27,18 +27,16 @@ class Flownet < Formula
     process_type :background
   end
 
+  def post_install
+    system("sudo", "brew", "services", "start", "flownet")
+  end
+
   def caveats
     <<~EOS
-      FlowNet requires root privileges to manage AWDL interfaces.
-
-      To start FlowNet now and restart at boot:
-        sudo brew services start flownet
+      FlowNet is now running and will start automatically at boot.
 
       Check status:
         flowctl status
-
-      View logs:
-        flowctl logs
 
       Stop/restart:
         sudo brew services stop flownet

@@ -1,84 +1,51 @@
 # FlowNet
 
-AWDL suppression daemon for optimized WiFi performance on macOS.
+Kills AWDL (`awdl0`) to stop ping spikes and packet loss on macOS.
 
-## What It Does
+## Why?
 
-FlowNet monitors and automatically disables the AWDL (Apple Wireless Direct Link) interface (`awdl0`) to prevent WiFi performance degradation and UDP packet loss caused by AirDrop, Sidecar, and other Continuity features.
+If you've ever had random WiFi lag while gaming or on calls, it's probably AWDL. macOS turns it on automatically for AirDrop, Sidecar, and Continuity stuff. This daemon just keeps it off.
 
-## Inspiration
+Shoutout to [awdlkiller](https://github.com/jamestut/awdlkiller) for the original implementation. Apple's gotten stricter with security over the years, so this is a Swift rewrite that plays nice with modern macOS.
 
-This project is inspired by [awdlkiller](https://github.com/jamestut/awdlkiller) by James T., which pioneered the approach of suppressing AWDL to eliminate ping spikes on macOS. However, with Apple's evolving security requirements and system integrity protections in modern macOS versions, a new implementation approach became necessary. FlowNet reimplements this functionality using Swift and native macOS APIs to work seamlessly with current macOS versions while maintaining the same goal: preventing AWDL from disrupting network performance.
-
-## Install via Homebrew
+## Install
 
 ```bash
 brew tap Se7enbrc/flownet
 brew install flownet
-# Service starts automatically
 ```
 
-Check status:
+That's it. The service starts automatically.
+
+Check if it's working:
 ```bash
 flowctl status
-```
-
-## Manual Install
-
-```bash
-make
-sudo ./flowctl install
 ```
 
 ## Usage
 
 ```bash
-flowctl status    # Show daemon status and AWDL state
-flowctl start     # Start the daemon
-flowctl stop      # Stop the daemon
-flowctl restart   # Restart the daemon
-flowctl logs      # Tail daemon logs
+flowctl status    # show what's up
+flowctl logs      # see what it's doing
+flowctl restart   # restart if needed
 ```
 
-## Update
+## What you lose
 
-```bash
-brew upgrade flownet
-```
+AirDrop, Universal Control, Sidecar, and AirPlay won't work while this is running. That's the tradeoff for stable network performance.
 
 ## Uninstall
 
 ```bash
-flowctl stop
+sudo brew services stop flownet
 brew uninstall flownet
 ```
 
-Or manually:
-```bash
-sudo ./flowctl uninstall
-```
+## How it works
 
-## How It Works
+Watches for AWDL interface changes via BSD routing sockets, immediately runs `ifconfig awdl0 down` when it comes up. Zero polling, zero CPU overhead when idle.
 
-1. Daemon monitors AWDL interface via BSD routing sockets
-2. Detects when AWDL comes UP (triggered by macOS for Continuity features)
-3. Immediately executes `ifconfig awdl0 down`
-4. Runs as LaunchDaemon (survives reboots)
-5. Event-driven (no polling) - instant response with zero CPU overhead
-
-## Requirements
-
-- macOS 13.0+
-- Xcode Command Line Tools (for building)
-- sudo access (for daemon installation)
-
-## Files
-
-- `src/flownet-daemon.swift` - Background daemon source
-- `flowctl` - CLI control utility
-- `flownet.rb` - Homebrew formula
-- `com.whaleyshire.flownet.plist` - LaunchDaemon configuration
-- `Makefile` - Build system
+Built with Swift, runs as a system daemon via launchd.
 
 ## License
 
