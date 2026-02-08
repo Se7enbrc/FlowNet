@@ -15,28 +15,84 @@ class Flownet < Formula
     # Install binaries
     bin.install "build/flownet"
     bin.install "flowctl"
+
+    # Install launchd plist
+    (prefix/"LaunchDaemons").install "com.whaleyshire.flownet.plist"
   end
 
-  service do
-    run [opt_bin/"flownet"]
-    run_type :immediate
-    keep_alive true
-    log_path var/"log/flownet.log"
-    error_log_path var/"log/flownet.log"
-    require_root true
-    process_type :background
+  def post_install
+    # Install plist to system location (requires sudo)
+    plist_path = "/Library/LaunchDaemons/com.whaleyshire.flownet.plist"
+    daemon_path = "#{opt_bin}/flownet"
+    log_path = "/var/log/flownet.log"
+
+    # Create temporary plist with correct paths
+    plist_content = <<~EOS
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+          <key>Label</key>
+          <string>com.whaleyshire.flownet</string>
+          <key>ProgramArguments</key>
+          <array>
+              <string>#{daemon_path}</string>
+          </array>
+          <key>RunAtLoad</key>
+          <true/>
+          <key>KeepAlive</key>
+          <dict>
+              <key>SuccessfulExit</key>
+              <false/>
+          </dict>
+          <key>ThrottleInterval</key>
+          <integer>30</integer>
+          <key>StandardOutPath</key>
+          <string>#{log_path}</string>
+          <key>StandardErrorPath</key>
+          <string>#{log_path}</string>
+          <key>UserName</key>
+          <string>root</string>
+          <key>ProcessType</key>
+          <string>Background</string>
+          <key>Nice</key>
+          <integer>1</integer>
+          <key>AbandonProcessGroup</key>
+          <true/>
+      </dict>
+      </plist>
+    EOS
+
+    # Write plist and start service (this will prompt for sudo)
+    system "sudo", "tee", plist_path, out: File::NULL, in: plist_content
+    system "sudo", "chmod", "644", plist_path
+    system "sudo", "chown", "root:wheel", plist_path
+    system "sudo", "touch", log_path
+    system "sudo", "chmod", "644", log_path
+
+    # Stop existing service if running
+    system "sudo", "launchctl", "bootout", "system/com.whaleyshire.flownet", err: File::NULL
+
+    # Start the service
+    system "sudo", "launchctl", "bootstrap", "system", plist_path
+    system "sudo", "launchctl", "kickstart", "system/com.whaleyshire.flownet"
+
+    ohai "FlowNet is now running!"
   end
 
   def caveats
     <<~EOS
-      Start FlowNet:
-        sudo brew services start flownet
+      FlowNet is running and will start automatically at boot.
 
       Check status:
         flowctl status
 
       View logs:
         flowctl logs
+
+      Stop/restart:
+        sudo launchctl bootout system/com.whaleyshire.flownet
+        sudo launchctl bootstrap system /Library/LaunchDaemons/com.whaleyshire.flownet.plist
     EOS
   end
 end
