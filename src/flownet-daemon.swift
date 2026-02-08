@@ -114,9 +114,11 @@ class FlowNetDaemon {
     private func eventLoop() {
         var pollfd = Darwin.pollfd(fd: routeSocket, events: Int16(POLLIN), revents: 0)
         var buffer = [UInt8](repeating: 0, count: 2048)
+        var periodicCheckCounter = 0
+        let periodicCheckInterval = 5  // Check every 5 seconds as fallback
 
         while running {
-            // Poll with 1 second timeout to allow signal handling
+            // Poll with 1 second timeout to allow signal handling and periodic checks
             let result = Darwin.poll(&pollfd, 1, 1000)
 
             if result < 0 {
@@ -125,6 +127,19 @@ class FlowNetDaemon {
                 }
                 log("ERROR: poll() failed: \(String(cString: strerror(errno)))")
                 break
+            }
+
+            periodicCheckCounter += 1
+
+            // Periodic check as fallback (in case routing socket misses events)
+            if periodicCheckCounter >= periodicCheckInterval {
+                periodicCheckCounter = 0
+                if isAWDLUp() {
+                    if suppressAWDL() {
+                        suppressionCount += 1
+                        log("✓ Periodic check: AWDL suppressed (count: \(suppressionCount))")
+                    }
+                }
             }
 
             if result == 0 {
@@ -158,7 +173,7 @@ class FlowNetDaemon {
                 // Only suppress ONCE after draining all messages
                 if awdlStateChanged {
                     if isAWDLUp() {
-                        log("⚡ AWDL detected UP - engaging suppression")
+                        log("⚡ AWDL detected UP via routing socket")
                         if suppressAWDL() {
                             suppressionCount += 1
                             log("✓ AWDL suppressed (count: \(suppressionCount))")
