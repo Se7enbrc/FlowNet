@@ -1,8 +1,8 @@
 class Flownet < Formula
   desc "AWDL suppression daemon for optimized WiFi performance"
   homepage "https://github.com/Se7enbrc/flownet"
-  url "https://github.com/Se7enbrc/flownet/archive/refs/tags/v1.0.0.tar.gz"
-  sha256 "619fc59096680041f21b4519f8bf5700fbb0ed29cb0d4d3536bdfbf37c8b51ef"
+  url "https://github.com/Se7enbrc/flownet/archive/refs/tags/v1.0.1.tar.gz"
+  sha256 "fa252b811dfc1c1bbb2200d463cd968b8e63edea4f054a908eb5dc83f13908d3"
   license "MIT"
 
   depends_on :macos
