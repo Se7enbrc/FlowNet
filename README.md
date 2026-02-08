@@ -11,11 +11,10 @@ Shoutout to [awdlkiller](https://github.com/jamestut/awdlkiller) for the origina
 ## Install
 
 ```bash
-brew tap Se7enbrc/flownet
-brew install flownet
+brew install Se7enbrc/flownet/flownet
 ```
 
-That's it. The service starts automatically.
+That's it. It'll prompt for your password and start automatically.
 
 Check if it's working:
 ```bash
