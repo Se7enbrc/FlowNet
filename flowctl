@@ -14,39 +14,30 @@ cmd_status() {
     echo "FlowNet Status:"
     echo ""
 
-    # Check daemon binary
-    if [ -f "$DAEMON_BIN" ]; then
-        echo "  ✓ Daemon installed: $DAEMON_BIN"
+    # Check AWDL status (most important)
+    if ifconfig awdl0 2>/dev/null | grep -q "UP"; then
+        echo "  ⚠️  AWDL is UP"
     else
-        echo "  ✗ Daemon NOT installed"
+        echo "  ✓ AWDL is DOWN"
     fi
 
     # Check if service is loaded
-    if sudo launchctl list | grep -q "$LABEL"; then
-        echo "  ✓ Service loaded and running"
-
-        # Get PID
-        PID=$(sudo launchctl list | grep "$LABEL" | awk '{print $1}')
-        if [ "$PID" != "-" ]; then
-            echo "    PID: $PID"
-        fi
+    if launchctl print system/$LABEL &>/dev/null || sudo launchctl print system/$LABEL &>/dev/null; then
+        echo "  ✓ Service running"
     else
         echo "  ✗ Service NOT running"
-    fi
-
-    # Check AWDL status
-    if ifconfig awdl0 2>/dev/null | grep -q "UP"; then
-        echo "  ⚠️  AWDL is UP (not suppressed)"
-    else
-        echo "  ✓ AWDL is DOWN (suppressed)"
+        echo ""
+        echo "Start with: sudo brew services start flownet"
     fi
 
     # Check logs
     if [ -f "$LOG_PATH" ]; then
-        LINES=$(wc -l < "$LOG_PATH")
-        echo "  ✓ Logs: $LOG_PATH ($LINES lines)"
-    else
-        echo "  ✗ No logs yet"
+        LINES=$(wc -l < "$LOG_PATH" 2>/dev/null || echo "?")
+        LAST_LINE=$(tail -1 "$LOG_PATH" 2>/dev/null)
+        echo "  ✓ Logs: $LOG_PATH"
+        if [ -n "$LAST_LINE" ]; then
+            echo "    Last: $LAST_LINE"
+        fi
     fi
 }
 

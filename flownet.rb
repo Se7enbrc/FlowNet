@@ -27,20 +27,16 @@ class Flownet < Formula
     process_type :background
   end
 
-  def post_install
-    system("sudo", "brew", "services", "start", "flownet")
-  end
-
   def caveats
     <<~EOS
-      FlowNet is now running and will start automatically at boot.
+      Start FlowNet:
+        sudo brew services start flownet
 
       Check status:
         flowctl status
 
-      Stop/restart:
-        sudo brew services stop flownet
-        sudo brew services restart flownet
+      View logs:
+        flowctl logs
     EOS
   end
 end
