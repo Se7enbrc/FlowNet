@@ -1,0 +1,12 @@
+# Build artifacts
+build/
+*.o
+*.swiftmodule
+*.swiftdoc
+
+# macOS
+.DS_Store
+*.xcuserstate
+
+# Logs
+*.log

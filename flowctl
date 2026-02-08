@@ -1,0 +1,216 @@
+#!/bin/bash
+#
+# flowctl - FlowNet daemon control utility
+#
+
+set -e
+
+DAEMON_BIN="/usr/local/bin/flownet"
+PLIST_PATH="/Library/LaunchDaemons/com.whaleyshire.flownet.plist"
+LOG_PATH="/var/log/flownet.log"
+LABEL="com.whaleyshire.flownet"
+
+cmd_status() {
+    echo "FlowNet Status:"
+    echo ""
+
+    # Check daemon binary
+    if [ -f "$DAEMON_BIN" ]; then
+        echo "  ✓ Daemon installed: $DAEMON_BIN"
+    else
+        echo "  ✗ Daemon NOT installed"
+    fi
+
+    # Check if service is loaded
+    if sudo launchctl list | grep -q "$LABEL"; then
+        echo "  ✓ Service loaded and running"
+
+        # Get PID
+        PID=$(sudo launchctl list | grep "$LABEL" | awk '{print $1}')
+        if [ "$PID" != "-" ]; then
+            echo "    PID: $PID"
+        fi
+    else
+        echo "  ✗ Service NOT running"
+    fi
+
+    # Check AWDL status
+    if ifconfig awdl0 2>/dev/null | grep -q "UP"; then
+        echo "  ⚠️  AWDL is UP (not suppressed)"
+    else
+        echo "  ✓ AWDL is DOWN (suppressed)"
+    fi
+
+    # Check logs
+    if [ -f "$LOG_PATH" ]; then
+        LINES=$(wc -l < "$LOG_PATH")
+        echo "  ✓ Logs: $LOG_PATH ($LINES lines)"
+    else
+        echo "  ✗ No logs yet"
+    fi
+}
+
+cmd_start() {
+    if ! sudo launchctl list | grep -q "$LABEL"; then
+        echo "Starting FlowNet daemon..."
+        sudo launchctl bootstrap system "$PLIST_PATH"
+        sudo launchctl kickstart system/$LABEL
+        echo "✓ Started"
+    else
+        echo "✓ Already running"
+        sudo launchctl kickstart -k system/$LABEL
+        echo "✓ Restarted"
+    fi
+}
+
+cmd_stop() {
+    if sudo launchctl list | grep -q "$LABEL"; then
+        echo "Stopping FlowNet daemon..."
+        sudo launchctl bootout system/$LABEL
+        echo "✓ Stopped"
+    else
+        echo "✓ Already stopped"
+    fi
+}
+
+cmd_restart() {
+    cmd_stop
+    sleep 1
+    cmd_start
+}
+
+cmd_logs() {
+    if [ -f "$LOG_PATH" ]; then
+        tail -f "$LOG_PATH"
+    else
+        echo "No logs found at $LOG_PATH"
+        exit 1
+    fi
+}
+
+cmd_install() {
+    echo "Installing FlowNet daemon..."
+
+    # Check if running from build directory
+    if [ ! -f "build/flownet" ]; then
+        echo "Error: Run 'make' first"
+        exit 1
+    fi
+
+    # Install flowctl itself to /usr/local/bin
+    sudo cp flowctl /usr/local/bin/flowctl
+    sudo chmod 755 /usr/local/bin/flowctl
+    echo "  ✓ flowctl installed to /usr/local/bin"
+
+    # Copy daemon binary
+    sudo cp build/flownet "$DAEMON_BIN"
+    sudo chmod 755 "$DAEMON_BIN"
+    sudo chown root:wheel "$DAEMON_BIN"
+    echo "  ✓ Daemon binary installed"
+
+    # Copy plist
+    sudo cp com.whaleyshire.flownet.plist "$PLIST_PATH"
+    sudo chmod 644 "$PLIST_PATH"
+    sudo chown root:wheel "$PLIST_PATH"
+    echo "  ✓ LaunchDaemon configured"
+
+    # Create log file
+    sudo touch "$LOG_PATH"
+    sudo chmod 644 "$LOG_PATH"
+    echo "  ✓ Log file created"
+
+    # Start service
+    cmd_start
+
+    echo ""
+    echo "✓ FlowNet installed and running"
+    echo ""
+    echo "flowctl is now in your PATH. Run 'flowctl status' from anywhere."
+}
+
+cmd_uninstall() {
+    echo "Uninstalling FlowNet daemon..."
+
+    # Stop service
+    cmd_stop 2>/dev/null || true
+
+    # Remove files
+    sudo rm -f "$DAEMON_BIN"
+    sudo rm -f "$PLIST_PATH"
+    sudo rm -f /usr/local/bin/flowctl
+    echo "  ✓ Files removed"
+
+    # Ask about logs
+    if [ -f "$LOG_PATH" ]; then
+        read -p "Remove logs? (y/N) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            sudo rm -f "$LOG_PATH"
+            echo "  ✓ Logs removed"
+        fi
+    fi
+
+    echo "✓ FlowNet uninstalled"
+    echo ""
+    echo "To reinstall:"
+    echo "  brew install flownet"
+    echo ""
+    echo "Or build from source:"
+    echo "  git clone https://github.com/se7enbrc/flownet.git"
+    echo "  cd flownet && make && sudo ./flowctl install"
+}
+
+cmd_help() {
+    cat << 'EOF'
+flowctl - FlowNet daemon control utility
+
+Usage: flowctl <command>
+
+Commands:
+  status      Show daemon status and AWDL state
+  start       Start the daemon
+  stop        Stop the daemon
+  restart     Restart the daemon
+  logs        Tail the daemon logs (Ctrl+C to exit)
+  install     Install daemon and start service
+  uninstall   Remove daemon and stop service
+
+Examples:
+  flowctl status
+  flowctl start
+  flowctl logs
+EOF
+}
+
+# Main
+case "${1:-}" in
+    status)
+        cmd_status
+        ;;
+    start)
+        cmd_start
+        ;;
+    stop)
+        cmd_stop
+        ;;
+    restart)
+        cmd_restart
+        ;;
+    logs)
+        cmd_logs
+        ;;
+    install)
+        cmd_install
+        ;;
+    uninstall)
+        cmd_uninstall
+        ;;
+    help|--help|-h|"")
+        cmd_help
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Run 'flowctl help' for usage"
+        exit 1
+        ;;
+esac
