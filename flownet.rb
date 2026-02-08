@@ -63,19 +63,18 @@ class Flownet < Formula
       </plist>
     EOS
 
-    # Write plist to temp file
-    temp_plist = "/tmp/flownet.plist"
-    File.write(temp_plist, plist_content)
+    # Install plist using echo and sudo tee
+    IO.popen(["sudo", "tee", plist_path], "w") do |f|
+      f.write(plist_content)
+    end
 
-    # Install plist and start service (will prompt for sudo)
-    system "sudo", "mv", temp_plist, plist_path
     system "sudo", "chmod", "644", plist_path
     system "sudo", "chown", "root:wheel", plist_path
     system "sudo", "touch", log_path
     system "sudo", "chmod", "644", log_path
 
     # Stop existing service if running (ignore errors)
-    system "sudo", "launchctl", "bootout", "system/com.whaleyshire.flownet", [:err] => :close
+    system "sudo", "launchctl", "bootout", "system/com.whaleyshire.flownet", err: [:child, :out]
 
     # Start the service
     system "sudo", "launchctl", "bootstrap", "system", plist_path
