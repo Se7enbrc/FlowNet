@@ -156,7 +156,7 @@ cmd_uninstall() {
     echo "  brew install flownet"
     echo ""
     echo "Or build from source:"
-    echo "  git clone https://github.com/se7enbrc/flownet.git"
+    echo "  git clone https://github.com/Se7enbrc/flownet.git"
     echo "  cd flownet && make && sudo ./flowctl install"
 }
 

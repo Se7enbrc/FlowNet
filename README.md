@@ -13,7 +13,7 @@ This project is inspired by [awdlkiller](https://github.com/jamestut/awdlkiller)
 ## Install via Homebrew
 
 ```bash
-brew tap se7enbrc/flownet
+brew tap Se7enbrc/flownet
 brew install flownet
 # Service starts automatically
 ```
