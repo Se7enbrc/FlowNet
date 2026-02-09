@@ -1,52 +1,20 @@
 #!/usr/bin/swift
 import Foundation
 import Darwin
+import SystemConfiguration
 
 let TARGETIFNAM = "awdl0"
-
-// Routing message types
-let RTM_IFINFO: UInt8 = 0x0e
-
-// Routing message header structure
-struct rt_msghdr {
-    var rtm_msglen: UInt16
-    var rtm_version: UInt8
-    var rtm_type: UInt8
-    var rtm_index: UInt16
-    var rtm_flags: Int32
-    var rtm_addrs: Int32
-    var rtm_pid: pid_t
-    var rtm_seq: Int32
-    var rtm_errno: Int32
-    var rtm_use: Int32
-    var rtm_inits: UInt32
-    var rtm_rmx: rt_metrics
-}
-
-struct rt_metrics {
-    var rmx_locks: UInt32
-    var rmx_mtu: UInt32
-    var rmx_hopcount: UInt32
-    var rmx_expire: Int32
-    var rmx_recvpipe: UInt32
-    var rmx_sendpipe: UInt32
-    var rmx_ssthresh: UInt32
-    var rmx_rtt: UInt32
-    var rmx_rttvar: UInt32
-    var rmx_pksent: UInt32
-    var rmx_state: UInt32
-    var rmx_filler: (UInt32, UInt32, UInt32)
-}
 
 class FlowNetDaemon {
     private var running = true
     private let logPath = "/var/log/flownet.log"
     private let pidPath = "/var/run/flownet.pid"
     private var shutdownRequested = false
-    private var routeSocket: Int32 = -1
     private var suppressionCount: UInt64 = 0
     private var aggressiveMode = true
     private var lastLoopTime = Date()
+    private var dynamicStore: SCDynamicStore?
+    private var runLoopSource: CFRunLoopSource?
 
     func start() {
         let myPID = ProcessInfo.processInfo.processIdentifier
@@ -69,31 +37,20 @@ class FlowNetDaemon {
             exit(1)
         }
 
-        routeSocket = socket(AF_ROUTE, SOCK_RAW, 0)
-        if routeSocket < 0 {
-            log("ERROR: Failed to create routing socket: \(String(cString: strerror(errno)))")
-            exit(1)
-        }
-
-        // Non-blocking for efficient message draining
-        let flags = fcntl(routeSocket, F_GETFL, 0)
-        if flags < 0 {
-            log("ERROR: Failed to get socket flags: \(String(cString: strerror(errno)))")
-            exit(1)
-        }
-        if fcntl(routeSocket, F_SETFL, flags | O_NONBLOCK) < 0 {
-            log("ERROR: Failed to set socket non-blocking: \(String(cString: strerror(errno)))")
+        // Setup real-time network monitoring with SCDynamicStore
+        if !setupNetworkMonitoring() {
+            log("ERROR: Failed to setup network monitoring")
             exit(1)
         }
 
         // Initial suppression
         suppressWithRetry(reason: "Initial startup")
 
-        log("Monitoring \(TARGETIFNAM) via routing socket + polling")
-        log("Wake-from-sleep detection enabled via time gap monitoring")
+        log("Monitoring \(TARGETIFNAM) via SCDynamicStore (real-time)")
+        log("Wake-from-sleep detection enabled")
 
         // Event-driven monitoring loop
-        eventLoop()
+        runEventLoop()
 
         cleanup()
         log("FlowNet daemon stopped (total suppressions: \(suppressionCount))")
@@ -108,126 +65,116 @@ class FlowNetDaemon {
         }
     }
 
-    private func eventLoop() {
-        var pollfd = Darwin.pollfd(fd: routeSocket, events: Int16(POLLIN), revents: 0)
-        var buffer = [UInt8](repeating: 0, count: 2048)
-        var periodicCheckCounter = 0
-        let periodicCheckInterval = 3
-        var watchdogCounter = 0
-        let watchdogInterval = 30
+    private func setupNetworkMonitoring() -> Bool {
+        // Create callback context
+        var context = SCDynamicStoreContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
 
-        while running {
-            // Detect potential wake from sleep (time gap > 5 seconds)
-            let now = Date()
-            let timeSinceLastLoop = now.timeIntervalSince(lastLoopTime)
-            if timeSinceLastLoop > 5.0 {
-                log("⏰ Detected \(String(format: "%.1f", timeSinceLastLoop))s time gap - possible wake from sleep")
-                suppressWithRetry(reason: "Post-wake")
+        // Create dynamic store
+        guard let store = SCDynamicStoreCreate(
+            nil,
+            "com.whaleyshire.flownet" as CFString,
+            { (store, changedKeys, info) in
+                guard let info = info else { return }
+                let daemon = Unmanaged<FlowNetDaemon>.fromOpaque(info).takeUnretainedValue()
+                daemon.handleNetworkChange(changedKeys: changedKeys as! [String])
+            },
+            &context
+        ) else {
+            log("ERROR: Failed to create SCDynamicStore")
+            return false
+        }
+
+        self.dynamicStore = store
+
+        // Monitor ALL network interface state changes
+        // This pattern catches any State:/Network/Interface/*/Link changes
+        let patterns = [
+            "State:/Network/Interface/.*/Link" as CFString,
+            "State:/Network/Interface/.*/IPv4" as CFString,
+            "State:/Network/Interface/.*/IPv6" as CFString,
+            "State:/Network/Global/IPv4" as CFString
+        ] as CFArray
+
+        if !SCDynamicStoreSetNotificationKeys(store, nil, patterns) {
+            log("ERROR: Failed to set notification keys")
+            return false
+        }
+
+        // Create run loop source
+        guard let rls = SCDynamicStoreCreateRunLoopSource(nil, store, 0) else {
+            log("ERROR: Failed to create run loop source")
+            return false
+        }
+
+        self.runLoopSource = rls
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), rls, .defaultMode)
+
+        // Setup wake from sleep notification
+        setupSleepWakeNotifications()
+
+        return true
+    }
+
+    private func setupSleepWakeNotifications() {
+        // Monitor system power state changes for sleep/wake detection
+        let patterns = ["State:/IOKit/PowerManagement/SystemPowerState" as CFString] as CFArray
+        if let store = dynamicStore {
+            SCDynamicStoreSetNotificationKeys(store, patterns, nil)
+        }
+    }
+
+    private func handleNetworkChange(changedKeys: [String]) {
+        // Check if any AWDL-related keys changed
+        let awdlChanged = changedKeys.contains { key in
+            key.contains(TARGETIFNAM) || key.contains("PowerManagement")
+        }
+
+        if awdlChanged {
+            // Check for wake from sleep
+            if changedKeys.contains(where: { $0.contains("PowerManagement") }) {
+                log("⏰ System wake detected")
+                // Give system a moment to stabilize
+                usleep(500000)  // 500ms
             }
-            lastLoopTime = now
 
-            // Poll with 1 second timeout
-            let result = Darwin.poll(&pollfd, 1, 1000)
+            // Immediate check and suppression
+            let status = checkAWDLStatus()
+            if status.isUp {
+                log("⚡ Real-time event: AWDL is UP (flags: \(status.flags), status: \(status.status))")
+                suppressWithRetry(reason: "Real-time detection")
+            }
+        }
+    }
 
-            if result < 0 {
-                if errno == EINTR {
-                    continue
-                }
-                log("ERROR: poll() failed: \(String(cString: strerror(errno)))")
+    private func runEventLoop() {
+        // Setup watchdog timer for periodic health checks
+        let timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            let status = self.checkAWDLStatus()
+            if status.isUp {
+                self.log("⚠️  Watchdog: AWDL is STILL UP - attempting suppression")
+                self.suppressWithRetry(reason: "Watchdog")
+            } else {
+                self.log("✓ Watchdog: AWDL is DOWN (suppressions: \(self.suppressionCount))")
+            }
+        }
+
+        // Run the event loop
+        while running {
+            let result = CFRunLoopRunInMode(.defaultMode, 1.0, true)
+
+            if result == .stopped || result == .finished {
                 break
             }
-
-            periodicCheckCounter += 1
-            watchdogCounter += 1
-
-            // Periodic check as fallback (in case routing socket misses events)
-            if periodicCheckCounter >= periodicCheckInterval {
-                periodicCheckCounter = 0
-                let awdlStatus = checkAWDLStatus()
-                if awdlStatus.isUp {
-                    log("⚠️  Periodic check: AWDL is UP (flags: \(awdlStatus.flags), status: \(awdlStatus.status))")
-                    suppressWithRetry(reason: "Periodic check")
-                }
-            }
-
-            // Watchdog logging (every 30 seconds)
-            if watchdogCounter >= watchdogInterval {
-                watchdogCounter = 0
-                let status = checkAWDLStatus()
-                if status.isUp {
-                    log("⚠️  Watchdog: AWDL is STILL UP - attempting suppression")
-                    suppressWithRetry(reason: "Watchdog")
-                } else {
-                    log("✓ Watchdog: AWDL is DOWN (suppressions: \(suppressionCount))")
-                }
-            }
-
-            if result == 0 {
-                continue
-            }
-
-            if pollfd.revents & Int16(POLLIN) != 0 {
-                // Drain all pending routing messages
-                var awdlStateChanged = false
-
-                while true {
-                    let bytesRead = recv(routeSocket, &buffer, buffer.count, 0)
-
-                    if bytesRead < 0 {
-                        if errno == EAGAIN || errno == EWOULDBLOCK {
-                            break
-                        }
-                        log("ERROR: recv() failed: \(String(cString: strerror(errno)))")
-                        break
-                    }
-
-                    if bytesRead == 0 {
-                        break
-                    }
-
-                    if shouldProcessMessage(&buffer, bytesRead) {
-                        awdlStateChanged = true
-                    }
-                }
-
-                // Suppress once after draining
-                if awdlStateChanged {
-                    let status = checkAWDLStatus()
-                    if status.isUp {
-                        log("⚡ AWDL detected UP via routing socket")
-                        suppressWithRetry(reason: "Routing socket event")
-                    }
-                }
-            }
-        }
-    }
-
-    private func shouldProcessMessage(_ buffer: inout [UInt8], _ length: Int) -> Bool {
-        guard length >= MemoryLayout<rt_msghdr>.size else {
-            return false
         }
 
-        let header = buffer.withUnsafeBytes { ptr in
-            ptr.load(as: rt_msghdr.self)
-        }
-
-        guard header.rtm_type == RTM_IFINFO else {
-            return false
-        }
-
-        guard let ifname = getInterfaceName(fromIndex: Int32(header.rtm_index)) else {
-            return false
-        }
-
-        return ifname == TARGETIFNAM
-    }
-
-    private func getInterfaceName(fromIndex index: Int32) -> String? {
-        var ifname = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
-        guard if_indextoname(UInt32(index), &ifname) != nil else {
-            return nil
-        }
-        return String(cString: ifname)
+        timer.invalidate()
     }
 
     // Interface state from ifconfig
@@ -392,9 +339,11 @@ class FlowNetDaemon {
     }
 
     private func cleanup() {
-        if routeSocket >= 0 {
-            close(routeSocket)
+        if let rls = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), rls, .defaultMode)
         }
+        dynamicStore = nil
+        runLoopSource = nil
         try? FileManager.default.removeItem(atPath: pidPath)
     }
 
