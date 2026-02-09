@@ -4,6 +4,10 @@ import Darwin
 import SystemConfiguration
 
 let TARGETIFNAM = "awdl0"
+let VERSION = "2026.02.3"
+
+// Atomic flag for signal handling (async-signal-safe)
+var signalReceived: sig_atomic_t = 0
 
 class FlowNetDaemon {
     private var running = true
@@ -11,24 +15,34 @@ class FlowNetDaemon {
     private let pidPath = "/var/run/flownet.pid"
     private var shutdownRequested = false
     private var suppressionCount: UInt64 = 0
-    private var aggressiveMode = true
     private var lastLoopTime = Date()
     private var dynamicStore: SCDynamicStore?
     private var runLoopSource: CFRunLoopSource?
+    private var storeContext: UnsafeMutablePointer<SCDynamicStoreContext>?
+    private var lockFd: Int32 = -1
 
     func start() {
         let myPID = ProcessInfo.processInfo.processIdentifier
-        log("FlowNet daemon starting (PID: \(myPID), aggressive mode: \(aggressiveMode))...")
+        log("FlowNet daemon v\(VERSION) starting (PID: \(myPID))...")
 
-        if let existingPID = readPIDFile(), processExists(existingPID) {
-            log("ERROR: Daemon already running with PID \(existingPID)")
+        // Lock-based PID file check to prevent race condition
+        lockFd = open(pidPath, O_CREAT | O_RDWR, 0o644)
+        if lockFd == -1 {
+            log("ERROR: Failed to open PID file")
+            exit(1)
+        }
+
+        if flock(lockFd, LOCK_EX | LOCK_NB) == -1 {
+            log("ERROR: Daemon already running (PID file locked)")
+            close(lockFd)
             exit(1)
         }
 
         writePIDFile(myPID)
 
-        signal(SIGTERM) { _ in FlowNetDaemon.shared.handleSignal(name: "SIGTERM") }
-        signal(SIGINT) { _ in FlowNetDaemon.shared.handleSignal(name: "SIGINT") }
+        // Async-signal-safe signal handlers
+        signal(SIGTERM) { _ in signalReceived = SIGTERM }
+        signal(SIGINT) { _ in signalReceived = SIGINT }
         signal(SIGHUP, SIG_IGN)
         signal(SIGPIPE, SIG_IGN)
 
@@ -57,21 +71,25 @@ class FlowNetDaemon {
         exit(0)
     }
 
-    func handleSignal(name: String) {
-        if !shutdownRequested {
+    func checkSignals() {
+        if signalReceived != 0 && !shutdownRequested {
             shutdownRequested = true
-            log("Received \(name) - shutting down")
+            let sigName = signalReceived == SIGTERM ? "SIGTERM" : "SIGINT"
+            log("Received \(sigName) - shutting down")
             running = false
         }
     }
 
     private func setupNetworkMonitoring() -> Bool {
-        // Create callback context
-        var context = SCDynamicStoreContext(
+        // Allocate context on heap for proper lifetime management
+        storeContext = UnsafeMutablePointer<SCDynamicStoreContext>.allocate(capacity: 1)
+        storeContext!.pointee = SCDynamicStoreContext(
             version: 0,
-            info: Unmanaged.passUnretained(self).toOpaque(),
+            info: Unmanaged.passRetained(self).toOpaque(),
             retain: nil,
-            release: nil,
+            release: { info in
+                Unmanaged<FlowNetDaemon>.fromOpaque(info).release()
+            },
             copyDescription: nil
         )
 
@@ -84,9 +102,13 @@ class FlowNetDaemon {
                 let daemon = Unmanaged<FlowNetDaemon>.fromOpaque(info).takeUnretainedValue()
                 daemon.handleNetworkChange(changedKeys: changedKeys as! [String])
             },
-            &context
+            storeContext
         ) else {
             log("ERROR: Failed to create SCDynamicStore")
+            if let ctx = storeContext {
+                Unmanaged<FlowNetDaemon>.fromOpaque(ctx.pointee.info!).release()
+                ctx.deallocate()
+            }
             return false
         }
 
@@ -116,17 +138,20 @@ class FlowNetDaemon {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), rls, .defaultMode)
 
         // Setup wake from sleep notification
-        setupSleepWakeNotifications()
+        if !setupSleepWakeNotifications() {
+            log("WARNING: Failed to setup sleep/wake notifications")
+        }
 
         return true
     }
 
-    private func setupSleepWakeNotifications() {
+    private func setupSleepWakeNotifications() -> Bool {
         // Monitor system power state changes for sleep/wake detection
         let patterns = ["State:/IOKit/PowerManagement/SystemPowerState" as CFString] as CFArray
         if let store = dynamicStore {
-            SCDynamicStoreSetNotificationKeys(store, patterns, nil)
+            return SCDynamicStoreSetNotificationKeys(store, patterns, nil)
         }
+        return false
     }
 
     private func handleNetworkChange(changedKeys: [String]) {
@@ -156,6 +181,10 @@ class FlowNetDaemon {
         // Setup watchdog timer for periodic health checks
         let timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
+
+            // Check for signals
+            self.checkSignals()
+
             let status = self.checkAWDLStatus()
             if status.isUp {
                 self.log("⚠️  Watchdog: AWDL is STILL UP - attempting suppression")
@@ -167,6 +196,9 @@ class FlowNetDaemon {
 
         // Run the event loop
         while running {
+            // Check for signals before each iteration
+            checkSignals()
+
             let result = CFRunLoopRunInMode(.defaultMode, 1.0, true)
 
             if result == .stopped || result == .finished {
@@ -270,21 +302,14 @@ class FlowNetDaemon {
 
     // Multi-layered suppression approach
     private func suppressAWDL() -> Bool {
-        var success = false
-
         // Layer 1: Bring interface down
-        success = executeCommand("/sbin/ifconfig", [TARGETIFNAM, "down"])
+        let success = executeCommand("/sbin/ifconfig", [TARGETIFNAM, "down"])
 
-        if aggressiveMode {
-            // Layer 2: Delete IPv6 link-local addresses (prevents some re-enablement)
-            if let ipv6Addrs = getIPv6Addresses() {
-                for addr in ipv6Addrs {
-                    _ = executeCommand("/sbin/ifconfig", [TARGETIFNAM, "inet6", addr, "delete"])
-                }
+        // Layer 2: Delete IPv6 link-local addresses (prevents some re-enablement)
+        if let ipv6Addrs = getIPv6Addresses() {
+            for addr in ipv6Addrs {
+                _ = executeCommand("/sbin/ifconfig", [TARGETIFNAM, "inet6", addr, "delete"])
             }
-
-            // Layer 3: Set interface metric to max (deprioritize routing)
-            _ = executeCommand("/sbin/route", ["change", "-ifp", TARGETIFNAM, "-hopcount", "255"])
         }
 
         return success
@@ -344,6 +369,19 @@ class FlowNetDaemon {
         }
         dynamicStore = nil
         runLoopSource = nil
+
+        // Clean up context memory
+        if let ctx = storeContext {
+            ctx.deallocate()
+            storeContext = nil
+        }
+
+        // Release PID file lock
+        if lockFd >= 0 {
+            close(lockFd)
+            lockFd = -1
+        }
+
         try? FileManager.default.removeItem(atPath: pidPath)
     }
 
@@ -375,4 +413,9 @@ class FlowNetDaemon {
 }
 
 // Entry point
+if CommandLine.arguments.contains("--version") || CommandLine.arguments.contains("-v") {
+    print("FlowNet v\(VERSION)")
+    exit(0)
+}
+
 FlowNetDaemon.shared.start()

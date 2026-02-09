@@ -4,15 +4,15 @@ Kills AWDL (`awdl0`) to stop latency spikes and packet loss during bandwidth sen
 
 ## Why?
 
-If you've ever had random WiFi stuttering in a game stream or on video calls, even dealing with high precision UDP telemetry, it's probably AWDL). macOS turns it on automatically for AirDrop, Sidecar, and Continuity features. This daemon will keep it off to preserve that traffic.
+If you've ever had random WiFi stuttering in a game stream or on video calls, even dealing with high precision UDP telemetry, it's probably AWDL. macOS turns it on automatically for AirDrop, Sidecar, and Continuity features. This daemon will keep it off to preserve that traffic.
 
-If at any point you need to disable flownet for these continuity features, just run
+If at any point you need to disable flownet for these continuity features, just run:
 
 ```bash
+flowctl stop
+# or
 sudo brew services stop flownet
 ```
-
-I plan to add flowctl stop in the future but it didn't feel necessary day 1 to me
 
 Big hat tip to to [awdlkiller](https://github.com/jamestut/awdlkiller) for the original design which inspired this modern knockoff. the required patterns have changed and awdlkiller became less reliable for me, so this is a Swift rewrite that plays nice with modern macOS.
 
@@ -32,9 +32,11 @@ flowctl status
 ## Usage
 
 ```bash
-flowctl status    # show what's up
-flowctl logs      # see what it's doing
-flowctl restart   # restart if needed
+flowctl status    # show daemon status and AWDL state
+flowctl logs      # tail the daemon logs
+flowctl start     # start the daemon
+flowctl stop      # stop the daemon
+flowctl restart   # restart the daemon
 ```
 
 ## What you lose
@@ -49,7 +51,7 @@ brew uninstall flownet
 
 ## How it works
 
-Watches for AWDL interface changes via BSD routing sockets, immediately runs `ifconfig awdl0 down` when it comes up.
+Monitors AWDL interface changes using macOS's `SCDynamicStore` for real-time notifications, with sleep/wake detection for resilience. Immediately runs `ifconfig awdl0 down` when AWDL comes up, with retry logic to ensure suppression succeeds.
 
 Built with Swift, runs as a system daemon via launchd.
 

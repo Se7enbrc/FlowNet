@@ -105,10 +105,46 @@ cmd_install() {
     sudo cp build/flownet "$DAEMON_BIN"
     sudo chmod 755 "$DAEMON_BIN"
     sudo chown root:wheel "$DAEMON_BIN"
-    echo "  ✓ Daemon binary installed"
+    echo "  ✓ Daemon binary installed to $DAEMON_BIN"
 
-    # Copy plist
-    sudo cp com.whaleyshire.flownet.plist "$PLIST_PATH"
+    # Generate plist with correct daemon path
+    cat > /tmp/flownet.plist << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.whaleyshire.flownet</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$DAEMON_BIN</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>$LOG_PATH</string>
+    <key>StandardErrorPath</key>
+    <string>$LOG_PATH</string>
+    <key>UserName</key>
+    <string>root</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>1</integer>
+    <key>AbandonProcessGroup</key>
+    <true/>
+</dict>
+</plist>
+EOF
+
+    sudo mv /tmp/flownet.plist "$PLIST_PATH"
     sudo chmod 644 "$PLIST_PATH"
     sudo chown root:wheel "$PLIST_PATH"
     echo "  ✓ LaunchDaemon configured"
